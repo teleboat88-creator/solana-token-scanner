@@ -1,14 +1,9 @@
 import os
 import time
-import threading
 import requests
-from flask import Flask, request
+from flask import Flask
 
 app = Flask(__name__)
-
-# =========================
-# ENVIRONMENT VARIABLES
-# =========================
 
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -16,12 +11,16 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 
-TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+SPL_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 
-STATE_FILE = "last_signature.txt"
+TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+
+# Simpan token yang sudah diproses selama service hidup
+processed_mints = set()
+
 
 # =========================
-# RPC
+# SOLANA RPC
 # =========================
 
 def rpc(method, params=None):
@@ -73,54 +72,30 @@ def send_telegram(message):
         timeout=30
     )
 
-    print("Telegram status:", response.status_code)
+    print("Telegram:", response.status_code)
 
 
 # =========================
-# STATE
+# CARI TRANSAKSI TOKEN
 # =========================
 
-def load_last_signature():
-
-    if not os.path.exists(STATE_FILE):
-        return None
-
-    with open(STATE_FILE, "r") as file:
-        return file.read().strip()
-
-
-def save_last_signature(signature):
-
-    with open(STATE_FILE, "w") as file:
-        file.write(signature)
-
-
-# =========================
-# GET NEW SIGNATURES
-# =========================
-
-def get_new_signatures(last_signature=None):
-
-    params = [
-        TOKEN_PROGRAM,
-        {
-            "limit": 50
-        }
-    ]
-
-    if last_signature:
-        params[1]["until"] = last_signature
+def get_recent_signatures():
 
     result = rpc(
         "getSignaturesForAddress",
-        params
+        [
+            SPL_TOKEN_PROGRAM,
+            {
+                "limit": 20
+            }
+        ]
     )
 
     return result or []
 
 
 # =========================
-# GET TRANSACTION
+# AMBIL TRANSAKSI
 # =========================
 
 def get_transaction(signature):
@@ -139,29 +114,44 @@ def get_transaction(signature):
 
 
 # =========================
-# FIND MINT
+# CARI MINT BARU
 # =========================
 
 def find_mints(transaction):
 
-    mints = []
+    found = []
 
-    if not transaction:
-        return mints
+    if not isinstance(transaction, dict):
+        return found
 
     try:
 
-        instructions = (
-            transaction["transaction"]
-            ["message"]
-            ["instructions"]
+        tx = transaction.get("transaction")
+
+        if not isinstance(tx, dict):
+            return found
+
+        message = tx.get("message")
+
+        if not isinstance(message, dict):
+            return found
+
+        instructions = message.get(
+            "instructions",
+            []
         )
+
+        if not isinstance(instructions, list):
+            return found
 
         for instruction in instructions:
 
+            if not isinstance(instruction, dict):
+                continue
+
             parsed = instruction.get("parsed")
 
-            if not parsed:
+            if not isinstance(parsed, dict):
                 continue
 
             program = instruction.get("program")
@@ -169,77 +159,247 @@ def find_mints(transaction):
 
             if (
                 program == "spl-token"
-                and instruction_type
-                in ["initializeMint", "initializeMint2"]
+                and instruction_type in [
+                    "initializeMint",
+                    "initializeMint2"
+                ]
             ):
 
-                info = parsed.get("info", {})
+                info = parsed.get("info")
+
+                if not isinstance(info, dict):
+                    continue
+
                 mint = info.get("mint")
 
-                if mint and mint not in mints:
-                    mints.append(mint)
+                if mint and mint not in found:
+                    found.append(mint)
 
     except Exception as error:
 
-        print("Gagal membaca transaksi:", error)
+        print("Parse transaction error:", error)
 
-    return mints
+    return found
 
 
 # =========================
-# PROCESS TRANSACTIONS
+# CEK TOKEN EXTENSION
 # =========================
 
-def process_transactions(signatures):
+def check_extension(mint):
 
-    # RPC mengembalikan transaksi dari terbaru → terlama.
-    # Kita proses dari lama → terbaru.
+    result = rpc(
+        "getAccountInfo",
+        [
+            mint,
+            {
+                "encoding": "jsonParsed"
+            }
+        ]
+    )
 
-    signatures = list(reversed(signatures))
+    if not isinstance(result, dict):
+        return None
 
-    newest_signature = None
+    value = result.get("value")
 
-    for item in signatures:
+    if not isinstance(value, dict):
+        return None
 
-        signature = item.get("signature")
+    owner = value.get("owner")
 
-        if not signature:
-            continue
+    if owner == SPL_TOKEN_PROGRAM:
+        return False
 
-        newest_signature = signature
+    if owner == TOKEN_2022_PROGRAM:
+        return True
 
-        try:
+    return None
 
-            transaction = get_transaction(signature)
 
-            mints = find_mints(transaction)
+# =========================
+# CEK SUPPLY
+# =========================
 
-            for mint in mints:
+def get_supply(mint):
 
-                print("")
-                print("================================")
-                print("🚨 NEW MINT DETECTED")
-                print("Mint:", mint)
-                print("Signature:", signature)
-                print("================================")
+    result = rpc(
+        "getTokenSupply",
+        [mint]
+    )
 
-                message = (
-                    "🚨 NEW SOLANA MINT\n\n"
-                    f"Mint:\n{mint}\n\n"
-                    f"Transaction:\n{signature}"
-                )
+    if not isinstance(result, dict):
+        return None
 
-                send_telegram(message)
+    value = result.get("value")
 
-        except Exception as error:
+    if not isinstance(value, dict):
+        return None
 
-            print(
-                "Transaction error:",
-                signature,
-                error
-            )
+    amount = value.get("amount")
 
-    return newest_signature
+    try:
+        return int(amount)
+    except:
+        return None
+
+
+# =========================
+# CEK TOP HOLDER
+# =========================
+
+def get_top_holder_percentage(mint, supply):
+
+    if not supply or supply <= 0:
+        return None
+
+    result = rpc(
+        "getTokenLargestAccounts",
+        [mint]
+    )
+
+    if not isinstance(result, dict):
+        return None
+
+    accounts = result.get("value")
+
+    if not isinstance(accounts, list):
+        return None
+
+    if len(accounts) == 0:
+        return None
+
+    first = accounts[0]
+
+    if not isinstance(first, dict):
+        return None
+
+    amount = first.get("amount")
+
+    try:
+        amount = int(amount)
+    except:
+        return None
+
+    percentage = (
+        amount / supply
+    ) * 100
+
+    return percentage
+
+
+# =========================
+# PROCESS TOKEN
+# =========================
+
+def process_mint(mint):
+
+    if mint in processed_mints:
+        return
+
+    processed_mints.add(mint)
+
+    print("")
+    print("==============================")
+    print("TOKEN BARU")
+    print("Mint:", mint)
+    print("==============================")
+
+    # -------------------------
+    # EXTENSION
+    # -------------------------
+
+    extension = check_extension(mint)
+
+    print(
+        "Token Extension:",
+        extension
+    )
+
+    # Kita hanya mau FALSE
+    if extension is not False:
+
+        print(
+            "❌ Bukan token extension FALSE."
+        )
+
+        return
+
+    print(
+        "✅ Token Extension FALSE"
+    )
+
+    # -------------------------
+    # SUPPLY
+    # -------------------------
+
+    supply = get_supply(mint)
+
+    if supply is None:
+
+        print(
+            "❌ Supply tidak bisa dibaca."
+        )
+
+        return
+
+    # -------------------------
+    # HOLDER
+    # -------------------------
+
+    top_holder = get_top_holder_percentage(
+        mint,
+        supply
+    )
+
+    if top_holder is None:
+
+        print(
+            "❌ Holder tidak bisa dihitung."
+        )
+
+        return
+
+    print(
+        f"Top Holder: {top_holder:.2f}%"
+    )
+
+    # -------------------------
+    # FILTER <20%
+    # -------------------------
+
+    if top_holder >= 20:
+
+        print(
+            "❌ Top holder >= 20%"
+        )
+
+        return
+
+    # -------------------------
+    # LOLOS
+    # -------------------------
+
+    print("")
+    print("🚨 TOKEN LOLOS FILTER")
+    print("Mint:", mint)
+    print(
+        f"Extension: FALSE"
+    )
+    print(
+        f"Top Holder: {top_holder:.2f}%"
+    )
+
+    message = (
+        "🚨 TOKEN LOLOS FILTER\n\n"
+        f"Mint:\n{mint}\n\n"
+        "Token Extension: FALSE\n"
+        f"Top Holder: {top_holder:.2f}%\n\n"
+        "✅ Extension FALSE\n"
+        "✅ Top Holder < 20%"
+    )
+
+    send_telegram(message)
 
 
 # =========================
@@ -248,94 +408,114 @@ def process_transactions(signatures):
 
 def scanner():
 
-    print("================================")
-    print("SOLANA TOKEN SCANNER")
-    print("================================")
+    print("")
+    print("==============================")
+    print("SOLANA TOKEN FILTER")
+    print("==============================")
 
     if not HELIUS_API_KEY:
-        print("❌ HELIUS_API_KEY tidak ditemukan.")
+
+        print(
+            "❌ HELIUS_API_KEY tidak ditemukan."
+        )
+
         return
 
     print("Helius API: OK")
-
-    last_signature = load_last_signature()
-
-    if last_signature:
-        print("Last signature:", last_signature)
-    else:
-        print("Belum ada signature tersimpan.")
 
     while True:
 
         try:
 
-            signatures = get_new_signatures(
-                last_signature
+            signatures = (
+                get_recent_signatures()
             )
 
             print(
-                "Transaksi ditemukan:",
+                "Transaksi:",
                 len(signatures)
             )
 
-            if signatures:
+            for item in signatures:
 
-                newest = process_transactions(
-                    signatures
+                if not isinstance(item, dict):
+                    continue
+
+                signature = item.get(
+                    "signature"
                 )
 
-                if newest:
+                if not signature:
+                    continue
 
-                    last_signature = newest
+                try:
 
-                    save_last_signature(
-                        last_signature
+                    transaction = (
+                        get_transaction(
+                            signature
+                        )
+                    )
+
+                    mints = find_mints(
+                        transaction
+                    )
+
+                    for mint in mints:
+
+                        process_mint(
+                            mint
+                        )
+
+                except Exception as error:
+
+                    print(
+                        "Transaction error:",
+                        error
                     )
 
         except Exception as error:
 
-            print("SCAN ERROR:", error)
+            print(
+                "Scanner error:",
+                error
+            )
 
-        print("Menunggu 30 detik...")
+        print(
+            "Menunggu 30 detik..."
+        )
+
         time.sleep(30)
 
 
 # =========================
-# FLASK
+# RAILWAY WEB SERVER
 # =========================
 
 @app.route("/", methods=["GET"])
 def home():
 
-    return "Solana Token Scanner is running", 200
+    return (
+        "Solana Token Filter is running",
+        200
+    )
 
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-
-    data = request.get_json(silent=True)
-
-    print("Webhook received:")
-    print(data)
-
-    return "OK", 200
-
-
-# =========================
-# START
-# =========================
 
 if __name__ == "__main__":
 
-    scanner_thread = threading.Thread(
+    import threading
+
+    thread = threading.Thread(
         target=scanner,
         daemon=True
     )
 
-    scanner_thread.start()
+    thread.start()
 
     port = int(
-        os.environ.get("PORT", 8080)
+        os.environ.get(
+            "PORT",
+            8080
+        )
     )
 
     app.run(
