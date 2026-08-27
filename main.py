@@ -27,8 +27,12 @@ def get_latest_tokens():
         timeout=30
     )
 
-    response.raise_for_status()
-    return response.json()
+    if response.status_code != 200:
+    print("SOLSCAN STATUS:", response.status_code)
+    print("SOLSCAN RESPONSE:", response.text)
+    raise Exception("Solscan API gagal")
+
+return response.json()
 
 
 def send_telegram(message):
