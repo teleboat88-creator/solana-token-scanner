@@ -1,79 +1,56 @@
 import os
-import time
 import requests
 from flask import Flask
 
 app = Flask(__name__)
 
-# ==================================================
-# VARIABLES
-# ==================================================
-
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-RPC_URL = (
-    f"https://mainnet.helius-rpc.com/"
-    f"?api-key={HELIUS_API_KEY}"
-)
-
-# SPL Token Program
-SPL_TOKEN_PROGRAM = (
-    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
-)
-
-# Token-2022 Program
-TOKEN_2022_PROGRAM = (
-    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
-)
-
-# Token yang sudah diperiksa
-processed_mints = set()
+RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 
 
-# ==================================================
-# RPC
-# ==================================================
+def test_helius():
 
-def rpc(method, params=None):
+    print("==============================")
+    print("HELIUS TEST")
+    print("==============================")
 
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": method,
-        "params": params or []
-    }
+    if not HELIUS_API_KEY:
+        print("❌ HELIUS_API_KEY tidak ada")
+        return False
 
     response = requests.post(
         RPC_URL,
-        json=payload,
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getHealth",
+            "params": []
+        },
         timeout=30
     )
 
-    response.raise_for_status()
+    print("Helius status:", response.status_code)
+    print("Helius:", response.text)
 
-    data = response.json()
-
-    if "error" in data:
-        raise Exception(data["error"])
-
-    return data.get("result")
+    return response.status_code == 200
 
 
-# ==================================================
-# TELEGRAM
-# ==================================================
+def test_telegram():
 
-def send_telegram(message):
+    print("==============================")
+    print("TELEGRAM TEST")
+    print("==============================")
 
     if not TELEGRAM_BOT_TOKEN:
-        print("TELEGRAM_BOT_TOKEN belum ada")
-        return
+        print("❌ TELEGRAM_BOT_TOKEN tidak ada")
+        return False
 
     if not TELEGRAM_CHAT_ID:
-        print("TELEGRAM_CHAT_ID belum ada")
-        return
+        print("❌ TELEGRAM_CHAT_ID tidak ada")
+        return False
 
     url = (
         f"https://api.telegram.org/"
@@ -84,225 +61,57 @@ def send_telegram(message):
         url,
         data={
             "chat_id": TELEGRAM_CHAT_ID,
-            "text": message
+            "text": "🟢 Helius Token Scanner aktif."
         },
         timeout=30
     )
 
+    print("Telegram status:", response.status_code)
+    print("Telegram:", response.text)
+
+    return response.status_code == 200
+
+
+@app.route("/")
+def home():
+
+    return "Helius Token Scanner is running", 200
+
+
+if __name__ == "__main__":
+
+    print("")
+    print("================================")
+    print("HELIUS TOKEN SCANNER")
+    print("================================")
+
+    helius_ok = test_helius()
+
+    telegram_ok = test_telegram()
+
+    print("")
+    print("================================")
+    print("RESULT")
+    print("================================")
+
     print(
-        "Telegram status:",
-        response.status_code
+        "Helius:",
+        "OK" if helius_ok else "FAILED"
     )
 
-
-# ==================================================
-# AMBIL SIGNATURE TERBARU
-# ==================================================
-
-def get_recent_signatures():
-
-    result = rpc(
-        "getSignaturesForAddress",
-        [
-            SPL_TOKEN_PROGRAM,
-            {
-                "limit": 50
-            }
-        ]
+    print(
+        "Telegram:",
+        "OK" if telegram_ok else "FAILED"
     )
 
-    if not isinstance(result, list):
-        return []
-
-    return result
-
-
-# ==================================================
-# AMBIL TRANSAKSI
-# ==================================================
-
-def get_transaction(signature):
-
-    return rpc(
-        "getTransaction",
-        [
-            signature,
-            {
-                "encoding": "jsonParsed",
-                "commitment": "confirmed",
-                "maxSupportedTransactionVersion": 0
-            }
-        ]
-    )
-
-
-# ==================================================
-# CARI MINT BARU
-# ==================================================
-
-def find_mints(transaction):
-
-    found = []
-
-    if not isinstance(transaction, dict):
-        return found
-
-    try:
-
-        tx = transaction.get("transaction")
-
-        if not isinstance(tx, dict):
-            return found
-
-        message = tx.get("message")
-
-        if not isinstance(message, dict):
-            return found
-
-        instructions = message.get(
-            "instructions",
-            []
+    port = int(
+        os.environ.get(
+            "PORT",
+            8080
         )
-
-        if not isinstance(instructions, list):
-            return found
-
-        for instruction in instructions:
-
-            if not isinstance(
-                instruction,
-                dict
-            ):
-                continue
-
-            parsed = instruction.get(
-                "parsed"
-            )
-
-            if not isinstance(
-                parsed,
-                dict
-            ):
-                continue
-
-            program = instruction.get(
-                "program"
-            )
-
-            instruction_type = parsed.get(
-                "type"
-            )
-
-            # Mint SPL baru
-            if (
-                program == "spl-token"
-                and instruction_type in (
-                    "initializeMint",
-                    "initializeMint2"
-                )
-            ):
-
-                info = parsed.get("info")
-
-                if not isinstance(
-                    info,
-                    dict
-                ):
-                    continue
-
-                mint = info.get("mint")
-
-                if (
-                    isinstance(mint, str)
-                    and mint
-                    and mint not in found
-                ):
-                    found.append(mint)
-
-    except Exception as error:
-
-        print(
-            "Gagal membaca transaksi:",
-            error
-        )
-
-    return found
-
-
-# ==================================================
-# CEK TOKEN PROGRAM
-# ==================================================
-
-def get_token_program(mint):
-
-    result = rpc(
-        "getAccountInfo",
-        [
-            mint,
-            {
-                "encoding": "base64"
-            }
-        ]
     )
 
-    if not isinstance(result, dict):
-        return None
-
-    value = result.get("value")
-
-    if not isinstance(value, dict):
-        return None
-
-    owner = value.get("owner")
-
-    if owner == SPL_TOKEN_PROGRAM:
-        return "SPL"
-
-    if owner == TOKEN_2022_PROGRAM:
-        return "TOKEN_2022"
-
-    return "UNKNOWN"
-
-
-# ==================================================
-# SUPPLY
-# ==================================================
-
-def get_token_supply(mint):
-
-    result = rpc(
-        "getTokenSupply",
-        [
-            mint,
-            {
-                "commitment": "confirmed"
-            }
-        ]
+    app.run(
+        host="0.0.0.0",
+        port=port
     )
-
-    if not isinstance(result, dict):
-        return None
-
-    value = result.get("value")
-
-    if not isinstance(value, dict):
-        return None
-
-    amount = value.get("amount")
-    decimals = value.get("decimals")
-
-    try:
-
-        return {
-            "amount": int(amount),
-            "decimals": int(decimals)
-        }
-
-    except Exception:
-
-        return None
-
-
-# ==================================================
-# TOP HOLDER / LARGEST TOKEN ACCOUNT
-# =================================================
