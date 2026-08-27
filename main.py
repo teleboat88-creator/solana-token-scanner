@@ -1,9 +1,14 @@
 import os
 import time
+import threading
 import requests
 from flask import Flask, request
 
 app = Flask(__name__)
+
+# =========================
+# ENVIRONMENT VARIABLES
+# =========================
 
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -11,12 +16,13 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 
-# SPL Token Program
 TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 
-# Simpan signature yang sudah diproses
-processed_signatures = set()
+STATE_FILE = "last_signature.txt"
 
+# =========================
+# RPC
+# =========================
 
 def rpc(method, params=None):
 
@@ -43,6 +49,10 @@ def rpc(method, params=None):
     return data.get("result")
 
 
+# =========================
+# TELEGRAM
+# =========================
+
 def send_telegram(message):
 
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -63,23 +73,55 @@ def send_telegram(message):
         timeout=30
     )
 
-    print("Telegram:", response.status_code)
+    print("Telegram status:", response.status_code)
 
 
-def get_recent_signatures():
+# =========================
+# STATE
+# =========================
+
+def load_last_signature():
+
+    if not os.path.exists(STATE_FILE):
+        return None
+
+    with open(STATE_FILE, "r") as file:
+        return file.read().strip()
+
+
+def save_last_signature(signature):
+
+    with open(STATE_FILE, "w") as file:
+        file.write(signature)
+
+
+# =========================
+# GET NEW SIGNATURES
+# =========================
+
+def get_new_signatures(last_signature=None):
+
+    params = [
+        TOKEN_PROGRAM,
+        {
+            "limit": 50
+        }
+    ]
+
+    if last_signature:
+        params[1]["until"] = last_signature
 
     result = rpc(
         "getSignaturesForAddress",
-        [
-            TOKEN_PROGRAM,
-            {
-                "limit": 20
-            }
-        ]
+        params
     )
 
     return result or []
 
+
+# =========================
+# GET TRANSACTION
+# =========================
 
 def get_transaction(signature):
 
@@ -96,7 +138,11 @@ def get_transaction(signature):
     )
 
 
-def find_new_mints(transaction):
+# =========================
+# FIND MINT
+# =========================
+
+def find_mints(transaction):
 
     mints = []
 
@@ -121,7 +167,6 @@ def find_new_mints(transaction):
             program = instruction.get("program")
             instruction_type = parsed.get("type")
 
-            # InitializeMint / InitializeMint2
             if (
                 program == "spl-token"
                 and instruction_type
@@ -141,47 +186,47 @@ def find_new_mints(transaction):
     return mints
 
 
-def scan():
+# =========================
+# PROCESS TRANSACTIONS
+# =========================
 
-    print("")
-    print("================================")
-    print("SOLANA MINT SCANNER")
-    print("================================")
+def process_transactions(signatures):
 
-    signatures = get_recent_signatures()
+    # RPC mengembalikan transaksi dari terbaru → terlama.
+    # Kita proses dari lama → terbaru.
 
-    print("Signature ditemukan:", len(signatures))
+    signatures = list(reversed(signatures))
 
-    # Proses dari yang paling lama ke terbaru
-    for item in reversed(signatures):
+    newest_signature = None
+
+    for item in signatures:
 
         signature = item.get("signature")
 
         if not signature:
             continue
 
-        if signature in processed_signatures:
-            continue
-
-        processed_signatures.add(signature)
+        newest_signature = signature
 
         try:
 
             transaction = get_transaction(signature)
 
-            mints = find_new_mints(transaction)
+            mints = find_mints(transaction)
 
             for mint in mints:
 
                 print("")
-                print("🚨 NEW MINT")
+                print("================================")
+                print("🚨 NEW MINT DETECTED")
                 print("Mint:", mint)
                 print("Signature:", signature)
+                print("================================")
 
                 message = (
                     "🚨 NEW SOLANA MINT\n\n"
                     f"Mint:\n{mint}\n\n"
-                    f"Signature:\n{signature}"
+                    f"Transaction:\n{signature}"
                 )
 
                 send_telegram(message)
@@ -189,16 +234,80 @@ def scan():
         except Exception as error:
 
             print(
-                "Error memproses signature:",
+                "Transaction error:",
                 signature,
                 error
             )
 
+    return newest_signature
+
+
+# =========================
+# SCANNER
+# =========================
+
+def scanner():
+
+    print("================================")
+    print("SOLANA TOKEN SCANNER")
+    print("================================")
+
+    if not HELIUS_API_KEY:
+        print("❌ HELIUS_API_KEY tidak ditemukan.")
+        return
+
+    print("Helius API: OK")
+
+    last_signature = load_last_signature()
+
+    if last_signature:
+        print("Last signature:", last_signature)
+    else:
+        print("Belum ada signature tersimpan.")
+
+    while True:
+
+        try:
+
+            signatures = get_new_signatures(
+                last_signature
+            )
+
+            print(
+                "Transaksi ditemukan:",
+                len(signatures)
+            )
+
+            if signatures:
+
+                newest = process_transactions(
+                    signatures
+                )
+
+                if newest:
+
+                    last_signature = newest
+
+                    save_last_signature(
+                        last_signature
+                    )
+
+        except Exception as error:
+
+            print("SCAN ERROR:", error)
+
+        print("Menunggu 30 detik...")
+        time.sleep(30)
+
+
+# =========================
+# FLASK
+# =========================
 
 @app.route("/", methods=["GET"])
 def home():
 
-    return "Solana Mint Scanner is running", 200
+    return "Solana Token Scanner is running", 200
 
 
 @app.route("/webhook", methods=["POST"])
@@ -212,34 +321,14 @@ def webhook():
     return "OK", 200
 
 
-def main():
-
-    if not HELIUS_API_KEY:
-        print("ERROR: HELIUS_API_KEY belum ada")
-        return
-
-    print("Helius API: OK")
-
-    while True:
-
-        try:
-            scan()
-
-        except Exception as error:
-
-            print("SCAN ERROR:", error)
-
-        # Jangan terlalu agresif untuk free tier
-        print("Menunggu 30 detik...")
-        time.sleep(30)
-
+# =========================
+# START
+# =========================
 
 if __name__ == "__main__":
 
-    import threading
-
     scanner_thread = threading.Thread(
-        target=main,
+        target=scanner,
         daemon=True
     )
 
