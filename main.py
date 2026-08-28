@@ -13,8 +13,6 @@ HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Kita pantau transaksi dari Pump AMM.
-# Ini bisa diperluas nanti kalau diperlukan.
 WATCH_ADDRESS = "So11111111111111111111111111111111111111112"
 
 HELIUS_URL = (
@@ -35,15 +33,12 @@ TOKEN_2022_PROGRAM = (
     "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 )
 
-# Token yang sudah diproses
 processed_mints = set()
-
-# Signature transaksi yang sudah diproses
 processed_signatures = set()
 
 
 # =========================================================
-# HELIUS ENHANCED TRANSACTION
+# HELIUS TRANSACTIONS
 # =========================================================
 
 def get_transactions():
@@ -139,6 +134,62 @@ def rpc(method, params=None):
 
 
 # =========================================================
+# NAMA + SYMBOL TOKEN
+# =========================================================
+
+def get_token_metadata(mint):
+
+    result = rpc(
+        "getAsset",
+        {
+            "id": mint,
+            "displayOptions": {
+                "showFungible": True
+            }
+        }
+    )
+
+    if not isinstance(result, dict):
+
+        return {
+            "name": "Unknown",
+            "symbol": "UNKNOWN"
+        }
+
+    name = "Unknown"
+    symbol = "UNKNOWN"
+
+    content = result.get("content")
+
+    if isinstance(content, dict):
+
+        metadata = content.get("metadata")
+
+        if isinstance(metadata, dict):
+
+            if isinstance(
+                metadata.get("name"),
+                str
+            ):
+                name = metadata.get(
+                    "name"
+                ).strip()
+
+            if isinstance(
+                metadata.get("symbol"),
+                str
+            ):
+                symbol = metadata.get(
+                    "symbol"
+                ).strip()
+
+    return {
+        "name": name or "Unknown",
+        "symbol": symbol or "UNKNOWN"
+    }
+
+
+# =========================================================
 # TELEGRAM
 # =========================================================
 
@@ -196,14 +247,17 @@ def send_telegram(message):
 
 
 # =========================================================
-# AMBIL MINT DARI TRANSAKSI
+# EXTRACT MINT
 # =========================================================
 
 def extract_mints(transaction):
 
     mints = []
 
-    if not isinstance(transaction, dict):
+    if not isinstance(
+        transaction,
+        dict
+    ):
         return mints
 
     transfers = transaction.get(
@@ -211,21 +265,34 @@ def extract_mints(transaction):
         []
     )
 
-    if not isinstance(transfers, list):
+    if not isinstance(
+        transfers,
+        list
+    ):
         return mints
 
     for transfer in transfers:
 
-        if not isinstance(transfer, dict):
+        if not isinstance(
+            transfer,
+            dict
+        ):
             continue
 
-        mint = transfer.get("mint")
+        mint = transfer.get(
+            "mint"
+        )
 
-        if not isinstance(mint, str):
+        if not isinstance(
+            mint,
+            str
+        ):
             continue
 
-        # Jangan proses SOL wrapped/native
-        if mint == "So11111111111111111111111111111111111111112":
+        # Jangan proses wrapped SOL
+        if mint == (
+            "So11111111111111111111111111111111111111112"
+        ):
             continue
 
         if mint not in mints:
@@ -236,7 +303,7 @@ def extract_mints(transaction):
 
 
 # =========================================================
-# CEK PROGRAM TOKEN
+# TOKEN EXTENSION
 # =========================================================
 
 def check_token_extension(mint):
@@ -252,15 +319,25 @@ def check_token_extension(mint):
         ]
     )
 
-    if not isinstance(result, dict):
+    if not isinstance(
+        result,
+        dict
+    ):
         return None
 
-    value = result.get("value")
+    value = result.get(
+        "value"
+    )
 
-    if not isinstance(value, dict):
+    if not isinstance(
+        value,
+        dict
+    ):
         return None
 
-    owner = value.get("owner")
+    owner = value.get(
+        "owner"
+    )
 
     if owner == SPL_TOKEN_PROGRAM:
 
@@ -289,22 +366,34 @@ def get_supply(mint):
         ]
     )
 
-    if not isinstance(result, dict):
+    if not isinstance(
+        result,
+        dict
+    ):
         return None
 
-    value = result.get("value")
+    value = result.get(
+        "value"
+    )
 
-    if not isinstance(value, dict):
+    if not isinstance(
+        value,
+        dict
+    ):
         return None
 
     try:
 
         return {
             "amount": int(
-                value.get("amount")
+                value.get(
+                    "amount"
+                )
             ),
             "decimals": int(
-                value.get("decimals")
+                value.get(
+                    "decimals"
+                )
             )
         }
 
@@ -329,12 +418,20 @@ def get_top_account(mint):
         ]
     )
 
-    if not isinstance(result, dict):
+    if not isinstance(
+        result,
+        dict
+    ):
         return None
 
-    accounts = result.get("value")
+    accounts = result.get(
+        "value"
+    )
 
-    if not isinstance(accounts, list):
+    if not isinstance(
+        accounts,
+        list
+    ):
         return None
 
     if len(accounts) == 0:
@@ -342,15 +439,22 @@ def get_top_account(mint):
 
     largest = accounts[0]
 
-    if not isinstance(largest, dict):
+    if not isinstance(
+        largest,
+        dict
+    ):
         return None
 
     try:
 
         return {
-            "address": largest.get("address"),
+            "address": largest.get(
+                "address"
+            ),
             "amount": int(
-                largest.get("amount")
+                largest.get(
+                    "amount"
+                )
             )
         }
 
@@ -373,7 +477,6 @@ def check_token(mint):
 
     # -----------------------------------------------------
     # FILTER 1
-    # Token Extension FALSE
     # -----------------------------------------------------
 
     extension = check_token_extension(
@@ -401,7 +504,9 @@ def check_token(mint):
     # SUPPLY
     # -----------------------------------------------------
 
-    supply = get_supply(mint)
+    supply = get_supply(
+        mint
+    )
 
     if not supply:
 
@@ -422,16 +527,17 @@ def check_token(mint):
         return
 
     # -----------------------------------------------------
-    # FILTER 2
-    # TOP HOLDER
+    # TOP ACCOUNT
     # -----------------------------------------------------
 
-    top = get_top_account(mint)
+    top = get_top_account(
+        mint
+    )
 
     if not top:
 
         print(
-            "❌ Top holder tidak tersedia"
+            "❌ Top account tidak tersedia"
         )
 
         return
@@ -454,7 +560,7 @@ def check_token(mint):
     )
 
     # -----------------------------------------------------
-    # HOLDER < 20%
+    # FILTER <20%
     # -----------------------------------------------------
 
     if percentage >= 20:
@@ -470,17 +576,46 @@ def check_token(mint):
     )
 
     # -----------------------------------------------------
-    # TOKEN LOLOS
+    # AMBIL NAMA + SYMBOL
+    # -----------------------------------------------------
+
+    metadata = get_token_metadata(
+        mint
+    )
+
+    name = metadata["name"]
+    symbol = metadata["symbol"]
+
+    print(
+        "Name:",
+        name
+    )
+
+    print(
+        "Symbol:",
+        symbol
+    )
+
+    # -----------------------------------------------------
+    # TELEGRAM
     # -----------------------------------------------------
 
     message = (
         "🚨 TOKEN LOLOS FILTER\n\n"
-        f"Mint:\n{mint}\n\n"
+
+        f"🪙 Nama: {name}\n"
+        f"🔤 Symbol: {symbol}\n\n"
+
+        f"📍 Mint:\n{mint}\n\n"
+
         "Token Extension: FALSE\n"
-        f"Top Holder: {percentage:.2f}%\n\n"
+        f"Top Token Account: {percentage:.2f}%\n\n"
+
         "FILTER:\n"
         "✅ Extension FALSE\n"
-        "✅ Top Holder < 20%"
+        "✅ Top Account <20%\n\n"
+
+        "🔎 Cek ulang holder di Solscan"
     )
 
     send_telegram(
@@ -506,9 +641,6 @@ def scan():
         len(transactions)
     )
 
-    # Helius mengembalikan terbaru → lama
-    # Kita proses terbaru dahulu.
-
     for transaction in transactions:
 
         if not isinstance(
@@ -524,7 +656,6 @@ def scan():
         if not signature:
             continue
 
-        # Jangan proses transaksi yang sama
         if signature in processed_signatures:
             continue
 
@@ -532,7 +663,6 @@ def scan():
             signature
         )
 
-        # Ambil mint
         mints = extract_mints(
             transaction
         )
@@ -559,7 +689,7 @@ def scan():
                     error
                 )
 
-    # Batasi memory
+    # Batasi penggunaan RAM
     if len(processed_signatures) > 5000:
 
         processed_signatures.clear()
@@ -570,7 +700,7 @@ def scan():
 
 
 # =========================================================
-# WEB SERVER
+# WEB
 # =========================================================
 
 @app.route("/")
@@ -602,48 +732,50 @@ if __name__ == "__main__":
     print(" HELIUS TOKEN FILTER")
     print("========================================")
 
-    if not HELIUS_API_KEY:
-
-        print(
-            "❌ HELIUS_API_KEY belum di-set"
-        )
-
-    else:
+    if HELIUS_API_KEY:
 
         print(
             "✅ HELIUS_API_KEY ditemukan"
         )
 
-    if not TELEGRAM_BOT_TOKEN:
+    else:
 
         print(
-            "❌ TELEGRAM_BOT_TOKEN belum di-set"
+            "❌ HELIUS_API_KEY belum di-set"
         )
 
-    else:
+    if TELEGRAM_BOT_TOKEN:
 
         print(
             "✅ TELEGRAM_BOT_TOKEN ditemukan"
         )
 
-    if not TELEGRAM_CHAT_ID:
+    else:
 
         print(
-            "❌ TELEGRAM_CHAT_ID belum di-set"
+            "❌ TELEGRAM_BOT_TOKEN belum di-set"
         )
 
-    else:
+    if TELEGRAM_CHAT_ID:
 
         print(
             "✅ TELEGRAM_CHAT_ID ditemukan"
         )
 
-    # Scanner berjalan di background
+    else:
+
+        print(
+            "❌ TELEGRAM_CHAT_ID belum di-set"
+        )
+
+    # -----------------------------------------------------
+    # BACKGROUND SCANNER
+    # -----------------------------------------------------
+
     import threading
 
     def background_scanner():
 
-        # Beri waktu Flask start
         time.sleep(3)
 
         while True:
@@ -671,6 +803,10 @@ if __name__ == "__main__":
     )
 
     scanner_thread.start()
+
+    # -----------------------------------------------------
+    # FLASK
+    # -----------------------------------------------------
 
     port = int(
         os.environ.get(
